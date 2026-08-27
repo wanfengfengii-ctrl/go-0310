@@ -32,8 +32,13 @@ func (a *Acquirer) Script(equipmentID string, outcomes ...domain.AcquireOutcome)
 }
 
 // Collect returns the next scripted outcome for an equipment id. Without a
-// script it reports a successful acquisition.
+// script it reports a successful acquisition. The mutex serialises the
+// read-and-advance of the per-equipment index so that concurrent Collect calls
+// against the same collector never return the same outcome twice or skip the
+// next one: each call consumes exactly one position in the queue.
 func (a *Acquirer) Collect(_ context.Context, equipmentID string) domain.AcquireOutcome {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	script, ok := a.scripts[equipmentID]
 	if !ok || len(script) == 0 {
 		return domain.AcquireOutcome{Success: true}
