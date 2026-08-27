@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"thermal-vacuum-test-gate/internal/domain"
+	"thermal-vacuum-test-gate/internal/store"
 )
 
 // Acquirer produces a scripted acquisition outcome for an equipment id. It is
@@ -22,31 +23,45 @@ func (e *Engine) SetAcquirer(a Acquirer) { e.acquirer = a }
 // call history, asks the adapter for an outcome, records the call, and only on
 // success submits the reading through the standard measurement path. Failed
 // attempts are archived as calls and never produce a valid measurement.
+//
+// Determining the attempt number and archiving the call run inside a single
+// store transaction: the call history read, the attempt computation and the
+// call append are committed together. Because the SQLite store is a single
+// serialized connection, the active transaction holds it for the duration, so
+// two concurrent collects against the same collector can never both observe an
+// identical call history and therefore can never share an attempt number. The
+// scripted outcome is consumed only after the attempt number is fixed, keeping
+// the adapter's replay order identical to the persisted attempt order.
 func (e *Engine) CollectMeasurement(ctx context.Context, runID string, req domain.MeasurementRequest) (domain.MeasurementCall, domain.Measurement, error) {
-	calls, err := e.store.Calls(ctx, req.CollectorID)
-	if err != nil {
-		return domain.MeasurementCall{}, domain.Measurement{}, err
-	}
-	attempt := len(calls) + 1
+	var call domain.MeasurementCall
 	var outcome domain.AcquireOutcome
-	if e.acquirer != nil {
-		outcome = e.acquirer.Collect(ctx, req.CollectorID)
-	} else {
-		outcome = domain.AcquireOutcome{
-			Success:                true,
-			TemperatureMilliKelvin: req.TemperatureMilliKelvin,
-			PressureMilliPa:        req.PressureMilliPa,
+	err := e.store.WithTx(ctx, func(tx store.Tx) error {
+		calls, err := tx.Calls(ctx, req.CollectorID)
+		if err != nil {
+			return err
 		}
-	}
-	call := domain.MeasurementCall{
-		ID:             newID(),
-		Attempt:        attempt,
-		EquipmentID:    req.CollectorID,
-		Success:        outcome.Success,
-		FailureType:    outcome.FailureType,
-		PayloadSummary: outcome.PayloadSummary,
-	}
-	if err := e.store.AppendCall(ctx, call); err != nil {
+		attempt := len(calls) + 1
+
+		if e.acquirer != nil {
+			outcome = e.acquirer.Collect(ctx, req.CollectorID)
+		} else {
+			outcome = domain.AcquireOutcome{
+				Success:                true,
+				TemperatureMilliKelvin: req.TemperatureMilliKelvin,
+				PressureMilliPa:        req.PressureMilliPa,
+			}
+		}
+		call = domain.MeasurementCall{
+			ID:             newID(),
+			Attempt:        attempt,
+			EquipmentID:    req.CollectorID,
+			Success:        outcome.Success,
+			FailureType:    outcome.FailureType,
+			PayloadSummary: outcome.PayloadSummary,
+		}
+		return tx.AppendCall(ctx, call)
+	})
+	if err != nil {
 		return domain.MeasurementCall{}, domain.Measurement{}, err
 	}
 	if !outcome.Success {
