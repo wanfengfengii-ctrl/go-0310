@@ -129,7 +129,15 @@ func (s *Server) wrap(e endpoint) http.HandlerFunc {
 		}
 		status, resp := e(ctx, r, body)
 		respBytes, _ := json.Marshal(resp)
-		if status < http.StatusBadRequest {
+		// Cache the outcome for replay. Every business outcome — including
+		// deterministic client failures such as 422 insufficient-evidence — is
+		// bound to the key so an identical retry replays the same result rather
+		// than re-executing the handler and possibly changing state (e.g. a
+		// retry that now succeeds after backfill). Only transient 5xx errors
+		// are not cached: they may reflect an inconsistent state and the caller
+		// is expected to retry. The engines' write paths run inside WithTx and
+		// roll back on error, so a cached failure leaves no partial mutation.
+		if status < http.StatusInternalServerError {
 			rec := domain.IdempotencyRecord{
 				Key:           key,
 				RequestDigest: digest,
