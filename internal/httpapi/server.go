@@ -27,6 +27,7 @@ type Server struct {
 	retest   *anomaly.Generator
 	arbiter  *anomaly.Arbiter
 	acquirer *lease.Acquirer
+	idemGate *idempotencyGate
 }
 
 // NewServer builds a Server and all of its backing components from a store and
@@ -44,6 +45,7 @@ func NewServer(s store.Store, now func() int64) *Server {
 		retest:   anomaly.NewGenerator(s, now),
 		arbiter:  anomaly.NewArbiter(s, now),
 		acquirer: acq,
+		idemGate: newIdempotencyGate(),
 	}
 	srv.register()
 	return srv
@@ -107,6 +109,12 @@ type endpoint func(ctx context.Context, r *http.Request, body []byte) (int, any)
 
 // wrap enforces the Idempotency-Key requirement and replay/conflict semantics
 // for every write route. The canonical digest binds the request path and body.
+//
+// Two identical requests carrying the same key race on the record insert at the
+// store level: both would run the side effect before either record exists, so
+// the operation (e.g. run creation) would execute twice. The per-key gate
+// serialises identical requests within this process so that the loser re-checks
+// the committed record and replays it instead of re-running the operation.
 func (s *Server) wrap(e endpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Idempotency-Key")
@@ -117,6 +125,9 @@ func (s *Server) wrap(e endpoint) http.HandlerFunc {
 		body, _ := io.ReadAll(r.Body)
 		digest := canonicalDigest(r.URL.Path, body)
 		ctx := r.Context()
+		release := s.idemGate.acquire(key)
+		defer release()
+
 		if rec, err := s.store.GetIdempotency(ctx, key); err == nil {
 			if rec.RequestDigest != digest {
 				writeError(w, domain.NewError(domain.CodeIdempotencyConflict, "idempotency key reused with different content"))
