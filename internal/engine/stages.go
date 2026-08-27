@@ -78,6 +78,12 @@ func (e *Engine) CompleteStage(ctx context.Context, runID string, stage domain.S
 			if !w.Passed {
 				return domain.NewError(domain.CodeInsufficientEvidence, "steady-state window not satisfied")
 			}
+			// Persist the steady-state evidence window in the same transaction
+			// as the stage progression so the coverage, range and drift evidence
+			// survives a restart and stays consistent with the advanced stage.
+			if err := tx.SaveWindow(ctx, w); err != nil {
+				return err
+			}
 		} else if err := checkNonSoak(plan, spec, ms); err != nil {
 			return err
 		}
