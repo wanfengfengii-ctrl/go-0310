@@ -48,15 +48,25 @@ func Recover(ctx context.Context, s store.Store, now Clock) (Report, error) {
 	return rep, nil
 }
 
-// verifyCheckpoint compares the run's persisted EventSeq with the maximum
-// committed event sequence, detecting any half-applied write.
+// verifyCheckpoint confirms the run's append-only event log is intact: the
+// events must form a contiguous sequence numbered from 1 and the highest
+// sequence must equal the run's persisted EventSeq. This catches both a
+// half-applied write (checkpoint out of step with the log) and an event gap
+// left by a crash mid-transaction (e.g. seq=2 persisted while seq=1 was lost),
+// which a plain max-seq comparison would miss.
 func verifyCheckpoint(ctx context.Context, s store.Store, run domain.TestRun) error {
 	events, err := s.Events(ctx, run.ID, 0)
 	if err != nil {
 		return err
 	}
 	var maxSeq int64
-	for _, e := range events {
+	for i, e := range events {
+		// The append-only log is numbered from 1 with no gaps; a hole means a
+		// committed event was lost, so the run must not be advanced.
+		if e.Seq != int64(i)+1 {
+			return fmt.Errorf("run %s: event log gap at seq %d (expected %d)",
+				run.ID, e.Seq, int64(i)+1)
+		}
 		if e.Seq > maxSeq {
 			maxSeq = e.Seq
 		}
