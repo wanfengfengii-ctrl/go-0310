@@ -105,6 +105,15 @@ func (g *Generator) CreateAnomaly(ctx context.Context, runID, sensorID, summary,
 			Affected:   affected,
 			Coverage:   retestCoverage(plan),
 		}
+		// Persist the retest generation in the same transaction as the freeze,
+		// generation bump, anomaly fact and event so the record is visible the
+		// instant the run is frozen and survives request cancellation. Writing it
+		// asynchronously after commit left a window where /retests/current
+		// reported the run frozen with no generation, and a cancelled request
+		// context dropped the write entirely.
+		if err := tx.SaveRetestGeneration(ctx, rg); err != nil {
+			return domain.NewError(domain.CodeGenerationConflict, "concurrent anomaly creation")
+		}
 		if err := tx.UpdateRun(ctx, run); err != nil {
 			return err
 		}
@@ -120,11 +129,6 @@ func (g *Generator) CreateAnomaly(ctx context.Context, runID, sensorID, summary,
 		out = rg
 		return nil
 	})
-	if err == nil {
-		go func() {
-			_ = g.store.SaveRetestGeneration(ctx, out)
-		}()
-	}
 	return out, err
 }
 
