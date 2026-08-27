@@ -90,6 +90,13 @@ func (g *Generator) CreateAnomaly(ctx context.Context, runID, sensorID, summary,
 		if _, err := tx.GetAnomaly(ctx, anomalyID); err == nil {
 			return domain.NewError(domain.CodeGenerationConflict, "anomaly fact already recorded")
 		}
+		// A frozen run already has an unresolved retest generation in
+		// progress. A new anomaly must not advance the generation and
+		// overwrite the active one (SaveRetestGeneration upserts by run_id)
+		// before the prior retest is resolved.
+		if run.Frozen {
+			return domain.NewError(domain.CodeRunFrozen, "retest generation in progress")
+		}
 		a := domain.Anomaly{ID: anomalyID, RunID: runID, Summary: summary, Basis: basis}
 		if err := tx.SaveAnomaly(ctx, a); err != nil {
 			return domain.NewError(domain.CodeGenerationConflict, "concurrent anomaly creation")
